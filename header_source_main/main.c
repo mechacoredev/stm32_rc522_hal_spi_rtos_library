@@ -357,12 +357,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 }
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi) {
     if (hspi->Instance == SPI3) {
-
+    	rc522_tx_dma_finished(rfid);
     }
 }
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi) {
     if (hspi->Instance == SPI3) {
-
+    	rc522_rx_dma_finished(rfid);
     }
 }
 /* USER CODE END 4 */
@@ -378,15 +378,14 @@ void rc522_task_start(void *argument)
 {
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
+	// 1. RC522'ye kart arama komutunu gönder.
+	rc522_request_start(rfid, RC522_PICC_CMD_REQIDL);
   for(;;)
   {
-	    // 1. RC522'ye kart arama komutunu gönder.
-		rc522_request_start(rfid, RC522_PICC_CMD_REQIDL);
-
 	    // 2. Semaforu bekle, AMA sonsuza kadar değil! Sadece 100 milisaniye bekle.
 	    // Eğer kesme gelirse (kart bulunursa), semafor verilir ve fonksiyon 'osOK' döner.
 	    // Eğer 100ms içinde kart bulunmazsa, fonksiyon timeout ile geri döner ve kod akmaya devam eder.
-		if(osSemaphoreAcquire(rc522sem1Handle, 100) == osOK)
+		if(osSemaphoreAcquire(rc522sem1Handle, 500) == osOK)
 	    {
 	        // Kesme geldi, yani bir kart bulundu! Şimdi kart bilgilerini oku.
 	        if(rc522_request_finish(rfid, rfid_buffer) == rc522_ok)
@@ -395,12 +394,14 @@ void rc522_task_start(void *argument)
 	            // Örneğin LED yakıp söndür.
 	            count++; // Test için sayacı burada artırabilirsin.
 	        }
+		}else{
+			rc522_request_start(rfid, RC522_PICC_CMD_REQIDL);
 		}
 
 	    // 3. Döngüyü yavaşlat.
 	    // Bu gecikme, CPU'yu gereksiz yere meşgul etmemek ve
 	    // her 250ms'de bir kart kontrolü yapmak için kritik öneme sahiptir.
-	    osDelay(250);
+	    osDelay(200);
   }
   /* USER CODE END 5 */
 }
