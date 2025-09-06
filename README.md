@@ -1,0 +1,1 @@
+# stm32_rc522_hal_spi_rtos_library
