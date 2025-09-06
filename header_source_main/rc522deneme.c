@@ -125,6 +125,19 @@ rc522_return_status_t static write_register_poll(rc522_handle dev, uint8_t reg_a
 	return rc522_ok;
 }
 
+rc522_return_status_t static read_register_poll(rc522_handle dev, uint8_t reg_addr, uint8_t* rxdata, uint16_t size){
+	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
+	uint8_t register_address = ((reg_addr<<1)&0x7E)|0x80;
+	if(HAL_SPI_Transmit(dev->spi_handle, &register_address, 1, dev->max_delay)!=HAL_OK){
+		return rc522_fail;
+	}
+	if(HAL_SPI_Receive(dev->spi_handle, rxdata, size, dev->max_delay)!=HAL_OK){
+		return rc522_fail;
+	}
+	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
+	return rc522_ok;
+}
+
 rc522_return_status_t static write_register_dma(rc522_handle dev, uint8_t reg_addr, uint8_t* txdata, uint16_t size){
 	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
 	uint8_t buffer[size+1];
@@ -133,19 +146,6 @@ rc522_return_status_t static write_register_dma(rc522_handle dev, uint8_t reg_ad
 		buffer[i+1]=txdata[i];
 	}
 	if(HAL_SPI_Transmit_DMA(dev->spi_handle, buffer, size+1)!=HAL_OK){
-		return rc522_fail;
-	}
-	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
-	return rc522_ok;
-}
-
-rc522_return_status_t static read_register_poll(rc522_handle dev, uint8_t reg_addr, uint8_t* rxdata, uint16_t size){
-	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
-	uint8_t register_address = ((reg_addr<<1)&0x7E)|0x80;
-	if(HAL_SPI_Transmit(dev->spi_handle, &register_address, 1, dev->max_delay)!=HAL_OK){
-		return rc522_fail;
-	}
-	if(HAL_SPI_Receive(dev->spi_handle, rxdata, size, dev->max_delay)!=HAL_OK){
 		return rc522_fail;
 	}
 	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
