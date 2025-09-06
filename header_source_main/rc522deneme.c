@@ -110,6 +110,7 @@ struct rc522_t{
 	uint8_t wait_irq;
 	uint8_t irq_en;
 	uint8_t command;
+	uint8_t tx_buffer[20];
 };
 
 rc522_return_status_t static write_register_poll(rc522_handle dev, uint8_t reg_addr, uint8_t* txdata, uint16_t size){
@@ -140,15 +141,12 @@ rc522_return_status_t static read_register_poll(rc522_handle dev, uint8_t reg_ad
 
 rc522_return_status_t static write_register_dma(rc522_handle dev, uint8_t reg_addr, uint8_t* txdata, uint16_t size){
 	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
-	uint8_t buffer[size+1];
-	buffer[0]=(reg_addr<<1)&0x7E;
-	for(uint8_t i=0; i<size; i++){
-		buffer[i+1]=txdata[i];
-	}
-	if(HAL_SPI_Transmit_DMA(dev->spi_handle, buffer, size+1)!=HAL_OK){
+	dev->tx_buffer[0]=(reg_addr<<1)&0x7E;
+	memcpy(&dev->tx_buffer[1],txdata,size);
+	if(HAL_SPI_Transmit_DMA(dev->spi_handle, dev->tx_buffer, size+1)!=HAL_OK){
+		HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
 		return rc522_fail;
 	}
-	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
 	return rc522_ok;
 }
 
@@ -159,9 +157,9 @@ rc522_return_status_t static read_register_dma(rc522_handle dev, uint8_t reg_add
 		return rc522_fail;
 	}
 	if(HAL_SPI_Receive_DMA(dev->spi_handle, rxdata, size)!=HAL_OK){
+		HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
 		return rc522_fail;
 	}
-	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
 	return rc522_ok;
 }
 
@@ -185,7 +183,7 @@ void static antenna_on(rc522_handle dev){
 	set_bit_mask(dev, RC522_REG_TX_CONTROL, 0x03);
 }
 
-void static antenna_off(rc522_handle dev){
+void static inline antenna_off(rc522_handle dev){
 	clear_bit_mask(dev, RC522_REG_TX_CONTROL, 0x03);
 }
 
@@ -327,4 +325,12 @@ rc522_return_status_t rc522_request_finish(rc522_handle dev, uint8_t* tagtype){
 		return rc522_fail;
 	}
 	return rc522_ok;
+}
+
+void rc522_tx_dma_finished(rc522_handle dev){
+
+}
+
+void rc522_rx_dma_finished(rc522_handle dev){
+
 }
