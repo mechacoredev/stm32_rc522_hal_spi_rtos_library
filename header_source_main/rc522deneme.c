@@ -8,7 +8,6 @@
 #include "rc522deneme.h"
 #include "stdlib.h"
 #include "string.h"
-#include "stdbool.h"
 
 typedef enum {
     RC522_CMD_IDLE              = 0x00, // no action, cancels current command
@@ -111,6 +110,7 @@ struct rc522_t{
 	uint8_t irq_en;
 	uint8_t command;
 	uint8_t tx_buffer[20];
+	TaskHandle_t owner_task;
 };
 
 rc522_return_status_t static write_register_poll(rc522_handle dev, uint8_t reg_addr, uint8_t* txdata, uint16_t size){
@@ -209,6 +209,15 @@ rc522_handle rc522_init(rc522_config_t* config){
 	return dev;
 }
 
+bool rc522_set_owner_task(rc522_handle dev, TaskHandle_t task_handle){
+	if(dev!=NULL){
+		dev->owner_task=task_handle;
+		return true;
+	}else{
+		return false;
+	}
+}
+
 rc522_return_status_t rc522_configure(rc522_handle dev, rc522_config_t* config){
 	if(write_register_poll(dev, RC522_REG_TMODE, &(config->tmode.raw), 1)!=rc522_ok){
 		return rc522_write_fail;
@@ -268,7 +277,9 @@ rc522_return_status_t static card_command_start(rc522_handle dev, uint8_t* sendd
 	set_bit_mask(dev, RC522_REG_FIFO_LEVEL, 0x80);
 	buffer = RC522_CMD_IDLE;
 	write_register_poll(dev, RC522_REG_COMMAND, &buffer, 1);
-	write_register_poll(dev, RC522_REG_FIFO_DATA, senddata, sendlen);
+	write_register_dma(dev, RC522_REG_FIFO_DATA, senddata, sendlen);
+	// burada beklenecek
+	ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50)); // max 50ms bekle
 	buffer = dev->command;
 	write_register_poll(dev, RC522_REG_COMMAND, &buffer, 1);
 	if(dev->command==RC522_CMD_TRANSCEIVE){
@@ -305,7 +316,9 @@ rc522_return_status_t static card_command_finish(rc522_handle dev, uint8_t* back
 		}
 		if(fifo_level==0) fifo_level=1;
 		if(fifo_level>16) fifo_level=16;
-		read_register_poll(dev, RC522_REG_FIFO_DATA, backdata, fifo_level);
+		read_register_dma(dev, RC522_REG_FIFO_DATA, backdata, fifo_level);
+		// burada beklenecek
+		ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50)); // max 50ms bekle
 	}
 	return rc522_ok;
 }
@@ -328,9 +341,17 @@ rc522_return_status_t rc522_request_finish(rc522_handle dev, uint8_t* tagtype){
 }
 
 void rc522_tx_dma_finished(rc522_handle dev){
-
+	// kullanıcı sadece rx522_tx_dma_finished yazsın diye bunları buraya yazdım. kullanıcı çok uğraşmasın istedim.
+	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    vTaskNotifyGiveFromISR(dev->owner_task, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 void rc522_rx_dma_finished(rc522_handle dev){
-
+	// kullanıcı sadece rx522_rx_dma_finished yazsın diye bunları buraya yazdım. kullanıcı çok uğraşmasın istedim.
+	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    vTaskNotifyGiveFromISR(dev->owner_task, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
