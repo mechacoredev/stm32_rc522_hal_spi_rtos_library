@@ -25,6 +25,7 @@
 #include "rc522deneme.h"
 #include "semphr.h"
 #include "FreeRTOS.h"
+#include "task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -162,7 +163,7 @@ int main(void)
 
   /* Create the thread(s) */
   /* creation of rc522_task */
-  rc522_taskHandle = osThreadNew(rc522_task_start, NULL, &rc522_task_attributes);
+  rc522_taskHandle = osThreadNew(rc522_task_start, (void*)rfid, &rc522_task_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -378,6 +379,8 @@ void rc522_task_start(void *argument)
 {
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
+	rc522_handle rfid = (rc522_handle)argument;
+	rc522_set_owner_task(rfid, xTaskGetCurrentTaskHandle());
 	// 1. RC522'ye kart arama komutunu gönder.
 	rc522_request_start(rfid, RC522_PICC_CMD_REQIDL);
   for(;;)
