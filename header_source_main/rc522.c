@@ -5,9 +5,13 @@
  *      Author: Enes
  */
 
-#include "rc522deneme.h"
+#include <rc522.h>
 #include "stdlib.h"
 #include "string.h"
+
+
+static rc522_handle rc522_devices[4];
+static uint8_t rc522_device_count = 0;
 
 typedef enum {
     RC522_CMD_IDLE              = 0x00, // no action, cancels current command
@@ -116,49 +120,19 @@ struct rc522_t{
 rc522_return_status_t static write_register_poll(rc522_handle dev, uint8_t reg_addr, uint8_t* txdata, uint16_t size){
 	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
 	uint8_t register_address = (reg_addr<<1)&0x7E;
-	if(HAL_SPI_Transmit(dev->spi_handle, &register_address, 1, dev->max_delay)!=HAL_OK){
-		return rc522_fail;
-	}
-	if(HAL_SPI_Transmit(dev->spi_handle, txdata, size, dev->max_delay)!=HAL_OK){
-		return rc522_fail;
-	}
+	HAL_SPI_Transmit(dev->spi_handle, &register_address, 1, dev->max_delay);
+	HAL_SPI_Transmit(dev->spi_handle, txdata, size, dev->max_delay);
 	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
 	return rc522_ok;
 }
 
 rc522_return_status_t static read_register_poll(rc522_handle dev, uint8_t reg_addr, uint8_t* rxdata, uint16_t size){
-	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
 	uint8_t register_address = ((reg_addr<<1)&0x7E)|0x80;
-	if(HAL_SPI_Transmit(dev->spi_handle, &register_address, 1, dev->max_delay)!=HAL_OK){
-		return rc522_fail;
-	}
-	if(HAL_SPI_Receive(dev->spi_handle, rxdata, size, dev->max_delay)!=HAL_OK){
-		return rc522_fail;
-	}
-	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
-	return rc522_ok;
-}
-
-rc522_return_status_t static write_register_dma(rc522_handle dev, uint8_t reg_addr, uint8_t* txdata, uint16_t size){
-	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
-	dev->tx_buffer[0]=(reg_addr<<1)&0x7E;
-	memcpy(&dev->tx_buffer[1],txdata,size);
-	if(HAL_SPI_Transmit_DMA(dev->spi_handle, dev->tx_buffer, size+1)!=HAL_OK){
+	for(uint8_t i=0; i<size; i++){
+		HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
+		HAL_SPI_Transmit(dev->spi_handle, &register_address, 1, dev->max_delay);
+		HAL_SPI_Receive(dev->spi_handle, &(rxdata[i]), 1, dev->max_delay);
 		HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
-		return rc522_fail;
-	}
-	return rc522_ok;
-}
-
-rc522_return_status_t static read_register_dma(rc522_handle dev, uint8_t reg_addr, uint8_t* rxdata, uint16_t size){
-	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
-	uint8_t register_address = ((reg_addr<<1)&0x7E)|0x80;
-	if(HAL_SPI_Transmit(dev->spi_handle, &register_address, 1, dev->max_delay)!=HAL_OK){
-		return rc522_fail;
-	}
-	if(HAL_SPI_Receive_DMA(dev->spi_handle, rxdata, size)!=HAL_OK){
-		HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
-		return rc522_fail;
 	}
 	return rc522_ok;
 }
@@ -206,7 +180,20 @@ rc522_handle rc522_init(rc522_config_t* config){
 	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
 	HAL_GPIO_WritePin(dev->rst_port, dev->rst_pin, GPIO_PIN_SET);
 	reset(dev);
+    if(rc522_device_count < 4){
+        rc522_devices[rc522_device_count++] = dev;
+    }
 	return dev;
+}
+
+void rc522_irq_dispatch(uint16_t GPIO_Pin){
+	for(uint8_t i=0; i<4; i++){
+		rc522_handle dev = rc522_devices[i];
+		if(dev->irq_pin == GPIO_Pin){
+			rc522_irq_handle(dev);
+			break;
+		}
+	}
 }
 
 bool rc522_set_owner_task(rc522_handle dev, TaskHandle_t task_handle){
@@ -250,7 +237,7 @@ rc522_return_status_t rc522_configure(rc522_handle dev, rc522_config_t* config){
 	return rc522_ok;
 }
 
-rc522_return_status_t static card_command_start(rc522_handle dev, uint8_t* senddata, uint8_t sendlen){
+rc522_return_status_t static card_command(rc522_handle dev, uint8_t* senddata, uint16_t sendlen, uint8_t* backdata, uint16_t* backlen){
 	switch(dev->command){
 	case RC522_CMD_MFAUTHENT:
 	{
@@ -272,23 +259,25 @@ rc522_return_status_t static card_command_start(rc522_handle dev, uint8_t* sendd
 	}
 	}
 	uint8_t buffer = dev->irq_en | 0x80;
+	uint8_t clr = 0x04;
 	write_register_poll(dev, RC522_REG_COM_IEN, &buffer, 1);
+	buffer=0;
+	write_register_poll(dev, RC522_REG_DIV_IEN, &buffer, 1);
 	clear_bit_mask(dev, RC522_REG_COM_IRQ, 0x80);
+	write_register_poll(dev, RC522_REG_DIV_IRQ, &clr, 1);
 	set_bit_mask(dev, RC522_REG_FIFO_LEVEL, 0x80);
 	buffer = RC522_CMD_IDLE;
 	write_register_poll(dev, RC522_REG_COMMAND, &buffer, 1);
-	write_register_dma(dev, RC522_REG_FIFO_DATA, senddata, sendlen);
-	// burada beklenecek
-	ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50)); // max 50ms bekle
+	write_register_poll(dev, RC522_REG_FIFO_DATA, senddata, sendlen);
 	buffer = dev->command;
 	write_register_poll(dev, RC522_REG_COMMAND, &buffer, 1);
 	if(dev->command==RC522_CMD_TRANSCEIVE){
 		set_bit_mask(dev, RC522_REG_BIT_FRAMING, 0x80);
 	}
-	return rc522_ok;
-}
-
-rc522_return_status_t static card_command_finish(rc522_handle dev, uint8_t* backdata, uint16_t* backlen){
+	// irq bekleniyor
+	if(ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250))==0){
+		return rc522_timeout;
+	}
 	if(dev->command==RC522_CMD_TRANSCEIVE){
 		clear_bit_mask(dev, RC522_REG_BIT_FRAMING, 0x80);
 	}
@@ -306,6 +295,7 @@ rc522_return_status_t static card_command_finish(rc522_handle dev, uint8_t* back
 	}
 	if(dev->command==RC522_CMD_TRANSCEIVE){
 		uint8_t fifo_level, last_bits;
+		HAL_Delay(1);
 		read_register_poll(dev, RC522_REG_FIFO_LEVEL, &fifo_level, 1);
 		read_register_poll(dev, RC522_REG_CONTROL, &last_bits, 1);
 		last_bits = last_bits & 0x07;
@@ -316,41 +306,166 @@ rc522_return_status_t static card_command_finish(rc522_handle dev, uint8_t* back
 		}
 		if(fifo_level==0) fifo_level=1;
 		if(fifo_level>16) fifo_level=16;
-		read_register_dma(dev, RC522_REG_FIFO_DATA, backdata, fifo_level);
-		// burada beklenecek
-		ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50)); // max 50ms bekle
+		read_register_poll(dev, RC522_REG_FIFO_DATA, backdata, fifo_level);
 	}
 	return rc522_ok;
 }
 
-rc522_return_status_t rc522_request_start(rc522_handle dev, uint8_t reqmode){
+rc522_return_status_t rc522_request(rc522_handle dev, uint8_t reqmode, uint8_t* tagtype){
+	if (dev == NULL) return rc522_fail;
 	uint8_t buffer = 0x07;
 	dev->command=RC522_CMD_TRANSCEIVE;
 	write_register_poll(dev, RC522_REG_BIT_FRAMING, &buffer, 1);
-	card_command_start(dev, &reqmode, 1);
-	return rc522_ok;
+	uint16_t backlen;
+	rc522_return_status_t status = card_command(dev, &reqmode, 1, tagtype, &backlen);
+	//if(backlen!=16) return rc522_fail;
+	return status;
 }
 
-rc522_return_status_t rc522_request_finish(rc522_handle dev, uint8_t* tagtype){
+rc522_return_status_t rc522_anticoll(rc522_handle dev, uint8_t* psernum){
+	if (dev == NULL) return rc522_fail;
+	uint8_t buffer[2];
+	buffer[0]=0;
+	write_register_poll(dev, RC522_REG_BIT_FRAMING, buffer, 1);
+	buffer[0]=RC522_PICC_CMD_ANTICOLL;
+	buffer[1]=0x20;
+	dev->command=RC522_CMD_TRANSCEIVE;
 	uint16_t backlen;
-	card_command_finish(dev, tagtype, &backlen);
-	if(backlen!=0x10){
+	rc522_return_status_t status = card_command(dev, buffer, 2, psernum, &backlen);
+	if(status!=rc522_ok) return rc522_fail;
+	//if(backlen!=40) return rc522_fail;
+	uint8_t sernumcheck=0;
+	for(uint8_t i=0; i<4; i++){
+		sernumcheck^=psernum[i];
+	}
+	if(sernumcheck!=psernum[4]){
 		return rc522_fail;
 	}
 	return rc522_ok;
 }
 
-void rc522_tx_dma_finished(rc522_handle dev){
-	// kullanıcı sadece rx522_tx_dma_finished yazsın diye bunları buraya yazdım. kullanıcı çok uğraşmasın istedim.
-	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    vTaskNotifyGiveFromISR(dev->owner_task, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+rc522_return_status_t static rc522_calculate_crc(rc522_handle dev, uint8_t* pin, uint8_t* pout, uint8_t sendlen){
+    // 1. Eski CRC interrupt’ı temizle
+    uint8_t clr = 0x04;
+    write_register_poll(dev, RC522_REG_DIV_IRQ, &clr, 1);
+    clear_bit_mask(dev, RC522_REG_COM_IRQ, 0x80);
+
+    // 2. CRC interrupt enable
+    uint8_t ien = 0x04 | 0x80; // CRCIRq + global IRQ
+    write_register_poll(dev, RC522_REG_DIV_IEN, &ien, 1);
+
+
+    // 3. FIFO temizle + veri yaz
+    set_bit_mask(dev, RC522_REG_FIFO_LEVEL, 0x80);
+    write_register_poll(dev, RC522_REG_FIFO_DATA, pin, sendlen);
+
+    // 4. Komut başlat (CalcCRC)
+    uint8_t cmd = RC522_CMD_CALC_CRC;
+    write_register_poll(dev, RC522_REG_COMMAND, &cmd, 1);
+
+	// wait for irq
+	// burası için interrupt ayarlamayı unutmayalım
+	if(ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200))==0){
+		return rc522_timeout;
+	}
+	read_register_poll(dev, RC522_REG_CRC_RESULT_L, pout, 1);
+	read_register_poll(dev, RC522_REG_CRC_RESULT, &(pout[1]), 1);
+	return rc522_ok;
 }
 
-void rc522_rx_dma_finished(rc522_handle dev){
-	// kullanıcı sadece rx522_rx_dma_finished yazsın diye bunları buraya yazdım. kullanıcı çok uğraşmasın istedim.
-	HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_SET);
+uint8_t rc522_select_tag(rc522_handle dev, uint8_t* sernum){
+	uint8_t buffer[7];
+	buffer[0]=RC522_PICC_CMD_SELECTTAG;
+	buffer[1]=0x70;
+	memcpy(&buffer[2],sernum,5);
+	rc522_return_status_t status = rc522_calculate_crc(dev, buffer, &buffer[7], 7);
+	if(status!=rc522_ok){
+		return 0;
+	}
+	dev->command=RC522_CMD_TRANSCEIVE;
+	uint16_t receive_bits;
+	status = card_command(dev, buffer, 9, buffer, &receive_bits);
+	uint8_t size;
+	if(status!=rc522_ok || receive_bits!=24){
+		return 0;
+	}
+	size=buffer[0];
+	return size;
+}
+
+rc522_return_status_t rc522_auth(rc522_handle dev, uint8_t auth_mode, uint8_t block_addr, uint8_t* pkey, uint8_t* psernum){
+	uint8_t buffer[12];
+	buffer[0]=auth_mode;
+	buffer[1]=block_addr;
+	memcpy(&buffer[2],pkey,6);
+	memcpy(&buffer[8],psernum,4);
+	uint16_t back_bits;
+	dev->command=RC522_CMD_MFAUTHENT;
+	rc522_return_status_t status = card_command(dev, buffer, 12, buffer, &back_bits);
+	uint8_t reg_status;
+	read_register_poll(dev, RC522_REG_STATUS2, &reg_status, 1);
+	if((reg_status&0x08)!=8){
+		status=rc522_fail;
+	}
+	return status;
+}
+
+void rc522_stop_crypo1(rc522_handle dev){
+	clear_bit_mask(dev, RC522_REG_STATUS2, 0x08);
+}
+
+rc522_return_status_t rc522_read(rc522_handle dev, uint8_t block_addr, uint8_t* receive_data){
+	uint8_t buffer[4];
+	buffer[0]=RC522_PICC_CMD_READ;
+	buffer[1]=block_addr;
+	uint16_t backlen;
+	rc522_calculate_crc(dev, buffer, &buffer[2], 2);
+	dev->command=RC522_CMD_TRANSCEIVE;
+	rc522_return_status_t status = card_command(dev, buffer, 4, receive_data, &backlen);
+	if(backlen!=0x90){
+		status=rc522_fail;
+	}
+	return status;
+}
+
+rc522_return_status_t rc522_write(rc522_handle dev, uint8_t block_addr, uint8_t* send_data){
+	uint8_t send_buffer[18];
+	uint8_t receive_buffer[4];
+	uint16_t backlen;
+	send_buffer[0]=RC522_PICC_CMD_WRITE;
+	send_buffer[1]=block_addr;
+	rc522_calculate_crc(dev, send_buffer, &send_buffer[2], 2);
+	dev->command=RC522_CMD_TRANSCEIVE;
+	rc522_return_status_t status = card_command(dev, send_buffer, 4, receive_buffer, &backlen);
+	if((receive_buffer[0]&0x0F)!=0x0A || backlen!=4){
+		status=rc522_fail;
+		return status;
+	}
+	receive_buffer[0]=0;
+	memcpy(send_buffer,send_data,16);
+	rc522_calculate_crc(dev, send_buffer, &send_buffer[16], 16);
+	dev->command=RC522_CMD_TRANSCEIVE;
+	status = card_command(dev, send_buffer, 18, receive_buffer, &backlen);
+	if((receive_buffer[0] & 0x0F) != 0x0A || backlen!=4) status=rc522_fail;
+	return status;
+}
+
+rc522_return_status_t rc522_halt(rc522_handle dev){
+	uint8_t buffer[4];
+	uint16_t backlen;
+	buffer[0]=RC522_PICC_CMD_HALT;
+	buffer[1]=0;
+	rc522_calculate_crc(dev, buffer, &buffer[2], 2);
+	dev->command=RC522_CMD_TRANSCEIVE;
+	card_command(dev, buffer, 4, &buffer[4], &backlen);
+	return rc522_ok;
+}
+
+void rc522_irq_handle(rc522_handle dev){
+	//if(dev==NULL || dev->owner_task==NULL) return;
+	uint8_t clr = 0x04;
+	clear_bit_mask(dev, RC522_REG_COM_IRQ, 0x80);
+	write_register_poll(dev, RC522_REG_DIV_IRQ, &clr, 1);
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     vTaskNotifyGiveFromISR(dev->owner_task, &xHigherPriorityTaskWoken);
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
