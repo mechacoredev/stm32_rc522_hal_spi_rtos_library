@@ -17,15 +17,16 @@
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
+#include <rc522.h>
 #include "main.h"
 #include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "rc522deneme.h"
 #include "semphr.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "string.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,8 +46,6 @@
 
 /* Private variables ---------------------------------------------------------*/
 SPI_HandleTypeDef hspi3;
-DMA_HandleTypeDef hdma_spi3_rx;
-DMA_HandleTypeDef hdma_spi3_tx;
 
 /* Definitions for rc522_task */
 osThreadId_t rc522_taskHandle;
@@ -55,22 +54,20 @@ const osThreadAttr_t rc522_task_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
-/* Definitions for rc522sem1 */
-osSemaphoreId_t rc522sem1Handle;
-const osSemaphoreAttr_t rc522sem1_attributes = {
-  .name = "rc522sem1"
-};
 /* USER CODE BEGIN PV */
-rc522_handle rfid;
 rc522_config_t rfid_conf;
-uint8_t rfid_buffer[16];
-uint8_t count=0;
+uint8_t rfid_buffer[2];
+uint8_t psernum[5];
+uint8_t buffer[5];
+uint8_t card_size;
+uint8_t block_to_read=4;
+uint8_t keyA[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t block_data[16];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_DMA_Init(void);
 static void MX_SPI3_Init(void);
 void rc522_task_start(void *argument);
 
@@ -112,7 +109,6 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
   MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
   rfid_conf.spi_handle = &hspi3;
@@ -134,7 +130,7 @@ int main(void)
   rfid_conf.rxmode.raw     = 0x00;
   rfid_conf.rfcfg.raw      = 0x70;   */
 
-  rfid = rc522_init(&rfid_conf);
+  rc522_handle rfid = rc522_init(&rfid_conf);
   rc522_configure(rfid, &rfid_conf);
   /* USER CODE END 2 */
 
@@ -144,10 +140,6 @@ int main(void)
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
-
-  /* Create the semaphores(s) */
-  /* creation of rc522sem1 */
-  rc522sem1Handle = osSemaphoreNew(1, 0, &rc522sem1_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
@@ -163,7 +155,7 @@ int main(void)
 
   /* Create the thread(s) */
   /* creation of rc522_task */
-  rc522_taskHandle = osThreadNew(rc522_task_start, (void*)rfid, &rc522_task_attributes);
+  rc522_taskHandle = osThreadNew(rc522_task_start, rfid, &rc522_task_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -274,25 +266,6 @@ static void MX_SPI3_Init(void)
 }
 
 /**
-  * Enable DMA controller clock
-  */
-static void MX_DMA_Init(void)
-{
-
-  /* DMA controller clock enable */
-  __HAL_RCC_DMA1_CLK_ENABLE();
-
-  /* DMA interrupt init */
-  /* DMA1_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
-  /* DMA1_Stream5_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
-
-}
-
-/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -347,24 +320,8 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 	if(GPIO_Pin==IRQ_Pin){
-		/*
-		        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        // Kesme geldiğinde semaforu ver ki yukarıdaki 'osSemaphoreAcquire' beklemesin.
-        xSemaphoreGiveFromISR(rc522sem1Handle, &xHigherPriorityTaskWoken);
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-		*/
-        osSemaphoreRelease(rc522sem1Handle);
+        rc522_irq_dispatch(GPIO_Pin);
 	}
-}
-void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi) {
-    if (hspi->Instance == SPI3) {
-    	rc522_tx_dma_finished(rfid);
-    }
-}
-void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi) {
-    if (hspi->Instance == SPI3) {
-    	rc522_rx_dma_finished(rfid);
-    }
 }
 /* USER CODE END 4 */
 
@@ -381,31 +338,33 @@ void rc522_task_start(void *argument)
   /* Infinite loop */
 	rc522_handle rfid = (rc522_handle)argument;
 	rc522_set_owner_task(rfid, xTaskGetCurrentTaskHandle());
-	// 1. RC522'ye kart arama komutunu gönder.
-	rc522_request_start(rfid, RC522_PICC_CMD_REQIDL);
   for(;;)
   {
-	    // 2. Semaforu bekle, AMA sonsuza kadar değil! Sadece 100 milisaniye bekle.
-	    // Eğer kesme gelirse (kart bulunursa), semafor verilir ve fonksiyon 'osOK' döner.
-	    // Eğer 100ms içinde kart bulunmazsa, fonksiyon timeout ile geri döner ve kod akmaya devam eder.
-		if(osSemaphoreAcquire(rc522sem1Handle, 500) == osOK)
-	    {
-	        // Kesme geldi, yani bir kart bulundu! Şimdi kart bilgilerini oku.
-	        if(rc522_request_finish(rfid, rfid_buffer) == rc522_ok)
-	        {
-	            // Başarılı! Burada kart ile ilgili işlemlerini yapabilirsin.
-	            // Örneğin LED yakıp söndür.
-	            count++; // Test için sayacı burada artırabilirsin.
-	        }
-		}else{
-			rc522_request_start(rfid, RC522_PICC_CMD_REQIDL);
-		}
-
-	    // 3. Döngüyü yavaşlat.
-	    // Bu gecikme, CPU'yu gereksiz yere meşgul etmemek ve
-	    // her 250ms'de bir kart kontrolü yapmak için kritik öneme sahiptir.
-	    osDelay(200);
+	memset(rfid_buffer,0,2);
+	memset(psernum,0,5);
+	card_size=0;
+	rc522_stop_crypo1(rfid);
+    // Adım 1: Kart var mı diye sor. Fonksiyon bitene kadar burada bekler.
+    if (rc522_request(rfid, RC522_PICC_CMD_REQIDL, rfid_buffer) == rc522_ok)
+    {
+        // Kart bulundu! ATQA 'atqa' dizisinin içinde.
+        // Adım 2: UID'sini iste. Bu fonksiyon da bitene kadar burada bekler.
+        if (rc522_anticoll(rfid, psernum) == rc522_ok)
+        {
+            if(((psernum[0]==193) && (psernum[1]==99) && (psernum[2]==247) && (psernum[3]==3) && (psernum[4]==86)) || ((psernum[0]==162) && (psernum[1]==98) && (psernum[2]==192) && (psernum[3]==1) && (psernum[4]==1))){
+            	card_size=rc522_select_tag(rfid, psernum);
+            	if(card_size!=0){
+            		if(rc522_auth(rfid, RC522_PICC_CMD_AUTHENT1A, block_to_read, keyA, psernum)==0){
+            			if(rc522_read(rfid, block_to_read, block_data)==0){
+            				rc522_halt(rfid);
+            			}
+            		}
+            	}
+            }
+        }
+    }
   }
+
   /* USER CODE END 5 */
 }
 
