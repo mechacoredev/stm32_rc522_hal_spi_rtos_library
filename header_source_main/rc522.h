@@ -5,8 +5,8 @@
  *      Author: Enes
  */
 
-#ifndef INC_RC522DENEME_H_
-#define INC_RC522DENEME_H_
+#ifndef INC_RC522_H_
+#define INC_RC522_H_
 
 #include "stm32f4xx_hal.h"
 #include "FreeRTOS.h"
@@ -146,12 +146,16 @@ typedef struct{
 
 rc522_handle rc522_init(rc522_config_t* config);
 rc522_return_status_t rc522_configure(rc522_handle dev, rc522_config_t* config);
-rc522_return_status_t rc522_request_start(rc522_handle dev, uint8_t reqmode);
-rc522_return_status_t rc522_request_finish(rc522_handle dev, uint8_t* tagtype);
-rc522_return_status_t rc522_request_start_interrupt(rc522_handle dev);
-rc522_return_status_t rc522_request_finish_interrupt(rc522_handle dev, uint8_t* tagtype);
-void rc522_tx_dma_finished(rc522_handle dev);
-void rc522_rx_dma_finished(rc522_handle dev);
 bool rc522_set_owner_task(rc522_handle dev, TaskHandle_t task_handle);
+void rc522_irq_handle(rc522_handle dev);
+rc522_return_status_t rc522_request(rc522_handle dev, uint8_t reqmode, uint8_t* tagtype);
+rc522_return_status_t rc522_anticoll(rc522_handle dev, uint8_t* psernum);
+void rc522_irq_dispatch(uint16_t GPIO_Pin);
+uint8_t rc522_select_tag(rc522_handle dev, uint8_t* sernum);
+rc522_return_status_t rc522_auth(rc522_handle dev, uint8_t auth_mode, uint8_t block_addr, uint8_t* pkey, uint8_t* psernum);
+void rc522_stop_crypo1(rc522_handle dev);
+rc522_return_status_t rc522_read(rc522_handle dev, uint8_t block_addr, uint8_t* receive_data);
+rc522_return_status_t rc522_write(rc522_handle dev, uint8_t block_addr, uint8_t* send_data);
+rc522_return_status_t rc522_halt(rc522_handle dev);
 
-#endif /* INC_RC522DENEME_H_ */
+#endif /* INC_RC522_H_ */
